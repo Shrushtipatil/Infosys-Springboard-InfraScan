@@ -1,0 +1,6 @@
+{
+  "name": "InfraScan",
+  "description": "AI-Powered Crack & Damage Assessment Platform for Civil Infrastructure using YOLOv8/11, U-Net Segmentation, Grad-CAM XAI, and PostGIS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
