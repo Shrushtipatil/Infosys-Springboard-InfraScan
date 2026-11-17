@@ -24,6 +24,12 @@ import {
   FileCheck2,
   Unlock,
   UserPlus,
+  Play,
+  Layers,
+  BarChart3,
+  ClipboardCheck,
+  SlidersHorizontal,
+  GitCompare,
 } from 'lucide-react';
 
 // ============================================================================
@@ -93,6 +99,7 @@ export interface AssetComposite {
     avg_brightness: number;
     image_hash: string;
     scale_mm_per_px: number;
+    is_calibrated?: boolean;
   };
   detection: {
     detection_id: number;
@@ -103,6 +110,20 @@ export interface AssetComposite {
     bbox_ymin: number;
     bbox_xmax: number;
     bbox_ymax: number;
+    baseline_classification?: {
+      label: 'Cracked' | 'Uncracked';
+      confidence: number;
+      model: string;
+      dataset: string;
+    };
+    multi_class_boxes?: Array<{
+      label: DefectClassType;
+      confidence: number;
+      xmin: number;
+      ymin: number;
+      xmax: number;
+      ymax: number;
+    }>;
   };
   segmentation: {
     segmentation_id: number;
@@ -113,6 +134,23 @@ export interface AssetComposite {
     crack_density_pct: number;
     svg_mask_paths: string[];
     gradcam_hotspots: GradCamHotspot[];
+    segmentation_metrics?: {
+      iou: number;
+      dice: number;
+      pixel_accuracy: number;
+      f1_score: number;
+      boundary_f1: number;
+      mask_area_px: number;
+    };
+    crack_geometry?: {
+      tortuosity_index: number;
+      dominant_orientation_deg: number;
+      branch_count: number;
+      junction_nodes: number;
+      skeleton_length_px: number;
+      mean_aperture_px: number;
+      max_aperture_px: number;
+    };
   };
   assessment: {
     assessment_id: number;
@@ -123,6 +161,15 @@ export interface AssetComposite {
     verified_by?: string;
     verified_at?: string;
     approval_status: 'AI Baseline' | 'Approved' | 'Reclassified' | 'Escalated';
+  };
+  maintenance_workflow?: {
+    asset_id: number;
+    work_order_id: string;
+    workflow_stage: 'Triaged' | 'Scheduled' | 'Crew Dispatched' | 'In Remediation' | 'Verified Closed';
+    assigned_team: string;
+    sla_days: number;
+    estimated_cost_usd: number;
+    updated_at: string;
   };
 }
 
@@ -151,12 +198,103 @@ export interface QcValidationResult {
   clahe_applied: boolean;
   clahe_clip_limit: number;
   clahe_grid_size: string;
+  is_calibrated?: boolean;
+  calibration_status?: string;
   scale_calibration_mm_per_px: number;
   image_hash: string;
   tiles: Array<{
     tile_id: string;
     region: string;
     contrast_gain: string;
+    status: string;
+  }>;
+}
+
+export interface ModelBenchmarkEntry {
+  model_id: string;
+  name: string;
+  family: 'Baseline Classification' | 'Object Detection' | 'Segmentation & Advanced CNN/Transformer';
+  architecture: 'CNN' | 'YOLO' | 'U-Net' | 'Transformer' | 'Hybrid';
+  dataset: string;
+  primary_metric_name: string;
+  primary_metric_value: number;
+  secondary_metric_name: string;
+  secondary_metric_value: number;
+  precision: number;
+  recall: number;
+  f1_or_dice: number;
+  latency_ms: number;
+  params_m: number;
+  epochs_trained: number;
+  is_selected: boolean;
+  selection_note: string;
+  last_evaluated_at: string;
+}
+
+export interface BenchmarksPayload {
+  models: ModelBenchmarkEntry[];
+  epoch_curve: Array<{
+    epoch: number;
+    unet_iou: number;
+    segformer_iou: number;
+    yolo_map: number;
+    resnet_acc: number;
+  }>;
+  per_class_ap: Array<{
+    defect_class: string;
+    ap_yolov11: number;
+    iou_segformer: number;
+    iou_unet: number;
+    samples: number;
+  }>;
+  summary: {
+    best_baseline_classifier: string;
+    best_detector: string;
+    best_baseline_segmentation: string;
+    best_advanced_transformer: string;
+  };
+}
+
+export interface AnalyticsSummary {
+  total_assets: number;
+  calibrated_assets: number;
+  total_crack_length_mm: number;
+  max_aperture_mm: number;
+  mean_crack_density_pct: number;
+  total_remediation_budget_usd: number;
+  severity_breakdown: Array<{ level: string; count: number; pct: number }>;
+  defect_class_breakdown: Array<{
+    defect_class: string;
+    count: number;
+    avg_max_width_mm: number;
+    avg_density_pct: number;
+  }>;
+  asset_type_risk: Array<{
+    asset_type: string;
+    count: number;
+    avg_health: number;
+    total_crack_length_mm: number;
+  }>;
+}
+
+export interface TasksStatusPayload {
+  tasks_completed: number;
+  tasks_total: number;
+  outcomes_operational: number;
+  outcomes_total: number;
+  tasks: Array<{
+    id: string;
+    title: string;
+    category: 'Image & CV' | 'Models & XAI' | 'GIS & Maintenance';
+    workspace: WorkspaceTab;
+    endpoint: string;
+    evidence: string;
+    status: string;
+  }>;
+  outcomes: Array<{
+    id: string;
+    title: string;
+    linked_tasks: string[];
     status: string;
   }>;
 }
@@ -351,7 +489,7 @@ export default function App() {
   });
 
   // Workspace 1: Asset Hub Filters & Modals
-  const [assetLayout, setAssetLayout] = useState<'table' | 'grid'>('table');
+  const [assetLayout, setAssetLayout] = useState<'table' | 'grid' | 'priority'>('table');
   const [filterType, setFilterType] = useState<string>('All');
   const [filterSeverity, setFilterSeverity] = useState<string>('All');
   const [filterPriority, setFilterPriority] = useState<string>('All');
@@ -361,6 +499,8 @@ export default function App() {
     asset: AssetComposite;
     history: HistoryEntry[];
   } | null>(null);
+  const [compareIdxA, setCompareIdxA] = useState<number>(2);
+  const [compareIdxB, setCompareIdxB] = useState<number>(0);
 
   // New Asset Form State
   const [newAssetForm, setNewAssetForm] = useState({
@@ -379,12 +519,16 @@ export default function App() {
   const [qcCustomImageSrc, setQcCustomImageSrc] = useState<string | null>(null);
   const [qcCustomFilename, setQcCustomFilename] = useState<string>('span_b14_nadir_tile.jpg');
   const [qcClaheEnabled, setQcClaheEnabled] = useState<boolean>(true);
+  const [qcIsCalibrated, setQcIsCalibrated] = useState<boolean>(true);
   const [qcRefMm, setQcRefMm] = useState<number>(100);
   const [qcRefPx, setQcRefPx] = useState<number>(294);
   const [qcResult, setQcResult] = useState<QcValidationResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Workspace 3: AI Inspection & Quantitative Analysis State
+  const [inspectionSubTab, setInspectionSubTab] = useState<'viewport' | 'benchmarks'>('viewport');
+  const [activeDetectorModel, setActiveDetectorModel] = useState<'YOLOv11x' | 'YOLOv8x' | 'RT-DETR-L'>('YOLOv11x');
+  const [activeSegModel, setActiveSegModel] = useState<'SegFormer-B2' | 'Attention U-Net' | 'Swin-UNet'>('SegFormer-B2');
   const [viewportLayer, setViewportLayer] = useState<ViewportLayer>('yolo');
   const [overlayOpacity, setOverlayOpacity] = useState<number>(88);
   const [overrideSeverity, setOverrideSeverity] = useState<SeverityLevelType>('Severe');
@@ -394,6 +538,12 @@ export default function App() {
   const [overrideComments, setOverrideComments] = useState<string>('');
   const [isSavingOverride, setIsSavingOverride] = useState<boolean>(false);
 
+  // Model Benchmarks, Training & Evaluation State
+  const [benchmarksData, setBenchmarksData] = useState<BenchmarksPayload | null>(null);
+  const [trainModelId, setTrainModelId] = useState<string>('segformer-b2');
+  const [trainEpochs, setTrainEpochs] = useState<number>(5);
+  const [isTrainingModel, setIsTrainingModel] = useState<boolean>(false);
+
   // Workspace 4: Geospatial Damage Mapping State
   const [mapSeverityFilter, setMapSeverityFilter] = useState<string>('All');
   const [showHeatmapLayer, setShowHeatmapLayer] = useState<boolean>(true);
@@ -401,7 +551,12 @@ export default function App() {
   const leafletMapRef = useRef<L.Map | null>(null);
   const markersLayerRef = useRef<L.LayerGroup | null>(null);
 
-  // Workspace 5: Report Export & FastAPI Source Code Viewer
+  // Workspace 5: Analytics, Tasks Matrix & Compliance Report Export
+  const [reportsSubTab, setReportsSubTab] = useState<'analytics' | 'compliance'>('analytics');
+  const [analyticsSummary, setAnalyticsSummary] = useState<AnalyticsSummary | null>(null);
+  const [tasksStatus, setTasksStatus] = useState<TasksStatusPayload | null>(null);
+  const [taskCategoryFilter, setTaskCategoryFilter] = useState<string>('All');
+  const [taskSearchQuery, setTaskSearchQuery] = useState<string>('');
   const [reportScope, setReportScope] = useState<'all' | 'critical_severe'>('all');
   const [includeXaiAppendix, setIncludeXaiAppendix] = useState<boolean>(true);
   const [includePostgisCoords, setIncludePostgisCoords] = useState<boolean>(true);
@@ -418,14 +573,17 @@ export default function App() {
     }, 4500);
   };
 
-  // Initial Data Fetch (/api/v1/assets, /api/v1/backend-source)
+  // Initial Data Fetch (/api/v1/assets, /api/v1/backend-source, /api/v1/models/benchmarks, /api/v1/analytics/summary, /api/v1/tasks/status)
   useEffect(() => {
     async function bootstrap() {
       setIsLoading(true);
       try {
-        const [assetsRes, srcRes] = await Promise.all([
+        const [assetsRes, srcRes, benchRes, analyticsRes, tasksRes] = await Promise.all([
           fetch('/api/v1/assets'),
           fetch('/api/v1/backend-source'),
+          fetch('/api/v1/models/benchmarks'),
+          fetch('/api/v1/analytics/summary'),
+          fetch('/api/v1/tasks/status'),
         ]);
         if (assetsRes.ok) {
           const assetsData: AssetComposite[] = await assetsRes.json();
@@ -438,6 +596,15 @@ export default function App() {
           const srcData = await srcRes.json();
           setFastApiSource(srcData.code || '');
         }
+        if (benchRes.ok) {
+          setBenchmarksData(await benchRes.json());
+        }
+        if (analyticsRes.ok) {
+          setAnalyticsSummary(await analyticsRes.json());
+        }
+        if (tasksRes.ok) {
+          setTasksStatus(await tasksRes.json());
+        }
       } catch (err) {
         console.error('Bootstrap error:', err);
       } finally {
@@ -446,6 +613,15 @@ export default function App() {
     }
     bootstrap();
   }, []);
+
+  const refreshAnalytics = async () => {
+    try {
+      const res = await fetch('/api/v1/analytics/summary');
+      if (res.ok) setAnalyticsSummary(await res.json());
+    } catch {
+      // silent
+    }
+  };
 
   // Selected Asset Composite
   const selectedAsset = useMemo(() => {
@@ -491,6 +667,7 @@ export default function App() {
             reference_distance_mm: qcRefMm,
             reference_pixel_count: qcRefPx,
             apply_clahe: qcClaheEnabled,
+            is_calibrated: qcIsCalibrated,
           }),
         });
         if (res.ok) {
@@ -506,6 +683,7 @@ export default function App() {
     qcSelectedPresetId,
     qcSimulatedBlurMode,
     qcClaheEnabled,
+    qcIsCalibrated,
     qcRefMm,
     qcRefPx,
     qcCustomImageSrc,
@@ -729,7 +907,12 @@ export default function App() {
           blur_laplacian_var: qcResult.laplacian_variance,
           avg_brightness: qcResult.avg_brightness,
           scale_mm_per_px: qcResult.scale_calibration_mm_per_px,
-          notes: `QC Validated (Var(ΔI)=${qcResult.laplacian_variance}, Scale=${qcResult.scale_calibration_mm_per_px} mm/px, CLAHE=${qcResult.clahe_applied ? 'ON' : 'OFF'})`,
+          is_calibrated: qcIsCalibrated,
+          notes: `QC Validated (Var(ΔI)=${qcResult.laplacian_variance}, ${
+            qcIsCalibrated
+              ? `Scale=${qcResult.scale_calibration_mm_per_px} mm/px`
+              : 'Uncalibrated px-only mode'
+          }, CLAHE=${qcResult.clahe_applied ? 'ON' : 'OFF'})`,
         }),
       });
       const data = await res.json();
@@ -742,12 +925,135 @@ export default function App() {
       );
       setSelectedAssetId(data.asset.asset_id);
       setActiveWorkspace('inspection');
+      setInspectionSubTab('viewport');
+      refreshAnalytics();
       showNotice(
         `Frame passed QC Gating and routed to YOLOv11 + U-Net inference for ${data.asset.asset_name}.`
       );
     } catch {
       showNotice('Error submitting frame to ingestion endpoint', 'error');
     }
+  };
+
+  // Train / Evaluate Model Handler (POST /api/v1/models/train)
+  const handleTrainModel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsTrainingModel(true);
+    try {
+      const res = await fetch('/api/v1/models/train', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${currentUser.token}`,
+        },
+        body: JSON.stringify({ model_id: trainModelId, additional_epochs: trainEpochs }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setBenchmarksData((prev) => (prev ? { ...prev, models: data.models } : prev));
+        showNotice(
+          `Completed ${trainEpochs}-epoch evaluation pass for ${data.updated_model.name} (${data.updated_model.primary_metric_name}: ${data.updated_model.primary_metric_value}%).`
+        );
+      }
+    } finally {
+      setIsTrainingModel(false);
+    }
+  };
+
+  // Select Active Production Model (POST /api/v1/models/select)
+  const handleSelectModel = async (modelId: string) => {
+    try {
+      const res = await fetch('/api/v1/models/select', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${currentUser.token}`,
+        },
+        body: JSON.stringify({ model_id: modelId }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setBenchmarksData((prev) => (prev ? { ...prev, models: data.models } : prev));
+        showNotice(`Selected "${data.selected_model.name}" as active benchmark model.`);
+      }
+    } catch {
+      showNotice('Unable to select model', 'error');
+    }
+  };
+
+  // Update Maintenance Prioritization Workflow Stage (POST /api/v1/maintenance/:assetId/workflow)
+  const handleUpdateWorkflowStage = async (
+    assetId: number,
+    workflowStage: 'Triaged' | 'Scheduled' | 'Crew Dispatched' | 'In Remediation' | 'Verified Closed'
+  ) => {
+    try {
+      const res = await fetch(`/api/v1/maintenance/${assetId}/workflow`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${currentUser.token}`,
+        },
+        body: JSON.stringify({ workflow_stage: workflowStage }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showNotice(data.detail || 'RBAC restriction updating work order', 'error');
+        return;
+      }
+      setAssets((prev) => prev.map((a) => (a.asset_id === data.asset_id ? data : a)));
+      refreshAnalytics();
+      showNotice(
+        `Work Order ${data.maintenance_workflow?.work_order_id} moved to "${workflowStage}".`
+      );
+    } catch {
+      showNotice('Network error updating maintenance workflow', 'error');
+    }
+  };
+
+  // Export Generated Binary Crack Mask SVG
+  const handleDownloadMaskSvg = (asset: AssetComposite) => {
+    const paths = asset.segmentation.svg_mask_paths
+      .map(
+        (d) =>
+          `  <path d="${d}" fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />`
+      )
+      .join('\n');
+    const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="${asset.image.width_px}" height="${asset.image.height_px}">\n  <rect width="100" height="100" fill="#000000" />\n${paths}\n</svg>`;
+    const blob = new Blob([svgContent], { type: 'image/svg+xml;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute(
+      'download',
+      `crack_mask_asset_${asset.asset_id}_${asset.detection.defect_class.replace(/\s+/g, '_')}.svg`
+    );
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    showNotice(`Generated and downloaded binary crack mask for ${asset.asset_name}.`);
+  };
+
+  // Export Model Evaluation Report JSON
+  const handleExportModelReport = () => {
+    if (!benchmarksData) return;
+    const report = {
+      generated_at: new Date().toISOString(),
+      evaluator: currentUser.full_name,
+      summary: benchmarksData.summary,
+      models: benchmarksData.models,
+      per_class_ap: benchmarksData.per_class_ap,
+    };
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `infrascan_model_evaluation_report_${Date.now()}.json`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    showNotice('Exported Model Evaluation & Benchmark Report (JSON).');
   };
 
   // Civil Engineer Override Handler (POST /api/v1/assessments/{id}/override)
@@ -780,6 +1086,7 @@ export default function App() {
         return;
       }
       setAssets((prev) => prev.map((a) => (a.asset_id === data.asset_id ? data : a)));
+      refreshAnalytics();
       showNotice(
         `Assessment #${selectedAsset.assessment.assessment_id} marked "${statusType}" by ${currentUser.full_name}.`
       );
@@ -1389,7 +1696,7 @@ export default function App() {
                 : 'border-transparent hover:text-slate-900'
             }`}
           >
-            5. Reports & API
+            5. Analytics & Reports
           </button>
         </nav>
 
@@ -1544,6 +1851,17 @@ export default function App() {
                     }`}
                   >
                     Card Grid
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAssetLayout('priority')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      assetLayout === 'priority'
+                        ? 'bg-white text-slate-900 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Priority Queue
                   </button>
                 </div>
 
@@ -1911,6 +2229,131 @@ export default function App() {
                 })}
               </div>
             )}
+
+            {assetLayout === 'priority' && (
+              <div className="border border-slate-200 rounded-lg bg-white overflow-hidden">
+                <div className="px-5 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-50/70">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-900">
+                      Maintenance Prioritization & Field Dispatch Queue
+                    </h2>
+                    <p className="text-xs text-slate-500">
+                      Risk-ranked work orders sorted by severity, SLA window, and maximum crack aperture.
+                    </p>
+                  </div>
+                  <span className="text-xs font-mono text-slate-600 tabular-nums">
+                    Active Queue: {filteredAssets.length} Work Orders
+                  </span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-xs font-medium text-slate-500 bg-slate-50">
+                        <th className="py-3 px-4">Work Order</th>
+                        <th className="py-3 px-4">Infrastructure Asset</th>
+                        <th className="py-3 px-4">Severity & Priority</th>
+                        <th className="py-3 px-4 text-right">Max Aperture</th>
+                        <th className="py-3 px-4 text-right">SLA Window</th>
+                        <th className="py-3 px-4 text-right">Est. Budget</th>
+                        <th className="py-3 px-4">Assigned Team</th>
+                        <th className="py-3 px-4">Workflow Stage</th>
+                        <th className="py-3 px-4 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200/70 text-xs">
+                      {[...filteredAssets]
+                        .sort((a, b) => {
+                          const rank: Record<string, number> = {
+                            Immediate: 4,
+                            Urgent: 3,
+                            Scheduled: 2,
+                            Routine: 1,
+                          };
+                          const diff =
+                            (rank[b.assessment.maintenance_priority] || 0) -
+                            (rank[a.assessment.maintenance_priority] || 0);
+                          return diff !== 0
+                            ? diff
+                            : b.segmentation.max_width_mm - a.segmentation.max_width_mm;
+                        })
+                        .map((asset) => {
+                          const sev = getSeverityMeta(asset.assessment.severity_level);
+                          const wf = asset.maintenance_workflow;
+                          return (
+                            <tr key={asset.asset_id} className="hover:bg-slate-50 transition-colors">
+                              <td className="py-3.5 px-4 font-mono font-semibold text-slate-800 whitespace-nowrap">
+                                {wf?.work_order_id || `WO-2026-${1040 + asset.asset_id}`}
+                              </td>
+                              <td className="py-3.5 px-4">
+                                <div className="font-semibold text-slate-900">{asset.asset_name}</div>
+                                <div className="text-[11px] text-slate-500">
+                                  {asset.asset_type} · {asset.detection.defect_class}
+                                </div>
+                              </td>
+                              <td className="py-3.5 px-4 whitespace-nowrap">
+                                <div className={`font-semibold ${sev.textClass}`}>
+                                  {asset.assessment.severity_level}
+                                </div>
+                                <div className="text-[11px] font-mono text-slate-600">
+                                  {asset.assessment.maintenance_priority}
+                                </div>
+                              </td>
+                              <td className="py-3.5 px-4 text-right font-mono tabular-nums text-slate-900">
+                                {asset.segmentation.max_width_mm.toFixed(2)} mm
+                              </td>
+                              <td className="py-3.5 px-4 text-right font-mono tabular-nums text-slate-700">
+                                {wf?.sla_days ?? 30}d
+                              </td>
+                              <td className="py-3.5 px-4 text-right font-mono tabular-nums text-slate-900">
+                                ${(wf?.estimated_cost_usd ?? 25000).toLocaleString()}
+                              </td>
+                              <td className="py-3.5 px-4 text-slate-700">
+                                {wf?.assigned_team || asset.responsible_department}
+                              </td>
+                              <td className="py-3.5 px-4">
+                                <select
+                                  value={wf?.workflow_stage || 'Triaged'}
+                                  onChange={(e) =>
+                                    handleUpdateWorkflowStage(
+                                      asset.asset_id,
+                                      e.target.value as
+                                        | 'Triaged'
+                                        | 'Scheduled'
+                                        | 'Crew Dispatched'
+                                        | 'In Remediation'
+                                        | 'Verified Closed'
+                                    )
+                                  }
+                                  className="px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded text-slate-900 font-medium focus:outline-none focus:border-blue-600"
+                                >
+                                  <option value="Triaged">Triaged</option>
+                                  <option value="Scheduled">Scheduled</option>
+                                  <option value="Crew Dispatched">Crew Dispatched</option>
+                                  <option value="In Remediation">In Remediation</option>
+                                  <option value="Verified Closed">Verified Closed</option>
+                                </select>
+                              </td>
+                              <td className="py-3.5 px-4 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedAssetId(asset.asset_id);
+                                    setActiveWorkspace('inspection');
+                                    setInspectionSubTab('viewport');
+                                  }}
+                                  className="px-2.5 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50 rounded transition-colors whitespace-nowrap cursor-pointer"
+                                >
+                                  Inspect
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -2161,51 +2604,84 @@ export default function App() {
                 )}
 
                 <div className="border border-slate-200 rounded-lg bg-white p-5 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-semibold text-slate-900">
-                      Scale Calibration Matrix
-                    </h3>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      Calibrate physical millimeter-per-pixel ratio from the fiducial ruler inside
-                      the inspection frame.
-                    </p>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        Scale Calibration Matrix
+                      </h3>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Toggle calibrated millimeter-per-pixel photogrammetry or pixel-only fallback.
+                      </p>
+                    </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-xs text-slate-600 mb-1">
-                        Fiducial Reference (mm)
-                      </label>
-                      <input
-                        type="number"
-                        min={10}
-                        max={2000}
-                        value={qcRefMm}
-                        onChange={(e) => setQcRefMm(Number(e.target.value) || 100)}
-                        className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-300 rounded-md text-slate-900 tabular-nums"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-slate-600 mb-1">
-                        Measured Span (px)
-                      </label>
-                      <input
-                        type="number"
-                        min={10}
-                        max={5000}
-                        value={qcRefPx}
-                        onChange={(e) => setQcRefPx(Number(e.target.value) || 294)}
-                        className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-300 rounded-md text-slate-900 tabular-nums"
-                      />
-                    </div>
+                  <div className="flex items-center gap-1 p-1 bg-slate-100 border border-slate-200 rounded-md">
+                    <button
+                      type="button"
+                      onClick={() => setQcIsCalibrated(true)}
+                      className={`flex-1 px-2.5 py-1.5 text-xs font-medium rounded transition-colors cursor-pointer ${
+                        qcIsCalibrated
+                          ? 'bg-white text-slate-900 shadow-2xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Calibrated Frame (mm/px)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setQcIsCalibrated(false)}
+                      className={`flex-1 px-2.5 py-1.5 text-xs font-medium rounded transition-colors cursor-pointer ${
+                        !qcIsCalibrated
+                          ? 'bg-white text-slate-900 shadow-2xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Uncalibrated Frame (px only)
+                    </button>
                   </div>
+
+                  {qcIsCalibrated ? (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs text-slate-600 mb-1">
+                          Fiducial Reference (mm)
+                        </label>
+                        <input
+                          type="number"
+                          min={10}
+                          max={2000}
+                          value={qcRefMm}
+                          onChange={(e) => setQcRefMm(Number(e.target.value) || 100)}
+                          className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-300 rounded-md text-slate-900 tabular-nums"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-600 mb-1">
+                          Measured Span (px)
+                        </label>
+                        <input
+                          type="number"
+                          min={10}
+                          max={5000}
+                          value={qcRefPx}
+                          onChange={(e) => setQcRefPx(Number(e.target.value) || 294)}
+                          className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-300 rounded-md text-slate-900 tabular-nums"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3 rounded-md bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                      No fiducial scale target detected. Crack length and aperture estimation will run
+                      in calibrated pixel-space units (px) until a reference scale is supplied.
+                    </div>
+                  )}
 
                   <div className="pt-3 border-t border-slate-200 flex items-center justify-between text-xs">
-                    <span className="text-slate-600">
-                      Computed Spatial Resolution:
-                    </span>
+                    <span className="text-slate-600">Computed Spatial Resolution:</span>
                     <span className="font-mono text-sm font-semibold text-blue-600 tabular-nums">
-                      {qcResult
+                      {!qcIsCalibrated
+                        ? 'Uncalibrated (px space)'
+                        : qcResult
                         ? `${qcResult.scale_calibration_mm_per_px} mm/px`
                         : `${(qcRefMm / Math.max(qcRefPx, 1)).toFixed(4)} mm/px`}
                     </span>
@@ -2224,33 +2700,60 @@ export default function App() {
             <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pb-5 border-b border-slate-200">
               <div>
                 <p className="text-xs font-medium text-blue-600 mb-1">
-                  03. Multi-Stage Computer Vision Pipeline · YOLOv11 Detection · U-Net Segmentation
-                  · Grad-CAM XAI
+                  03. Multi-Stage Computer Vision Pipeline · Classification · YOLO · Segmentation · Grad-CAM XAI
                 </p>
                 <h1 className="text-2xl font-semibold text-slate-900 tracking-tight">
-                  {selectedAsset.asset_name}
+                  {inspectionSubTab === 'viewport'
+                    ? selectedAsset.asset_name
+                    : 'Model Evaluation, Benchmarks & Training Workbench'}
                 </h1>
                 <p className="text-xs text-slate-600 mt-1">
-                  {selectedAsset.asset_type} · {selectedAsset.material_type} · Scale{' '}
-                  {selectedAsset.image.scale_mm_per_px} mm/px
+                  {selectedAsset.asset_type} · {selectedAsset.material_type} ·{' '}
+                  {selectedAsset.image.is_calibrated === false
+                    ? 'Uncalibrated Pixel-Space Mode'
+                    : `Calibrated Scale ${selectedAsset.image.scale_mm_per_px} mm/px`}
                 </p>
               </div>
 
               <div className="flex flex-wrap items-center gap-3 shrink-0">
-                <label className="text-xs font-medium text-slate-600 whitespace-nowrap">
-                  Switch Asset:
-                </label>
-                <select
-                  value={selectedAsset.asset_id}
-                  onChange={(e) => setSelectedAssetId(Number(e.target.value))}
-                  className="px-3 py-2 text-xs font-medium bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:border-blue-600"
-                >
-                  {assets.map((a) => (
-                    <option key={a.asset_id} value={a.asset_id}>
-                      #{a.asset_id} — {a.asset_name} ({a.detection.defect_class})
-                    </option>
-                  ))}
-                </select>
+                <div className="flex items-center gap-1 p-1 bg-slate-100 border border-slate-200 rounded-lg">
+                  <button
+                    type="button"
+                    onClick={() => setInspectionSubTab('viewport')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      inspectionSubTab === 'viewport'
+                        ? 'bg-white text-slate-900 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Visual Inspection & Masks
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setInspectionSubTab('benchmarks')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      inspectionSubTab === 'benchmarks'
+                        ? 'bg-white text-slate-900 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Model Benchmarks & Training
+                  </button>
+                </div>
+
+                {inspectionSubTab === 'viewport' && (
+                  <select
+                    value={selectedAsset.asset_id}
+                    onChange={(e) => setSelectedAssetId(Number(e.target.value))}
+                    className="px-3 py-2 text-xs font-medium bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:border-blue-600"
+                  >
+                    {assets.map((a) => (
+                      <option key={a.asset_id} value={a.asset_id}>
+                        #{a.asset_id} — {a.asset_name} ({a.detection.defect_class})
+                      </option>
+                    ))}
+                  </select>
+                )}
 
                 <button
                   type="button"
@@ -2263,375 +2766,851 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-              <div className="lg:col-span-7 space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-4 bg-white border border-slate-200 rounded-lg p-3">
-                  <div className="flex items-center gap-1 p-1 bg-slate-100 border border-slate-200 rounded-md overflow-x-auto">
-                    {(
-                      [
-                        { id: 'raw', label: 'Raw RGB' },
-                        { id: 'yolo', label: 'YOLO Bounding Boxes' },
-                        { id: 'unet', label: 'U-Net Segmentation Mask' },
-                        { id: 'gradcam', label: 'Grad-CAM Heatmap' },
-                      ] as Array<{ id: ViewportLayer; label: string }>
-                    ).map((tab) => (
-                      <button
-                        key={tab.id}
-                        type="button"
-                        onClick={() => setViewportLayer(tab.id)}
-                        className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                          viewportLayer === tab.id
-                            ? 'bg-blue-600 text-white shadow-2xs'
-                            : 'text-slate-600 hover:text-slate-900'
-                        }`}
-                      >
-                        {tab.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  {viewportLayer !== 'raw' && (
-                    <div className="flex items-center gap-2 text-xs">
-                      <span className="text-slate-600 whitespace-nowrap">Overlay Opacity:</span>
-                      <input
-                        type="range"
-                        min={20}
-                        max={100}
-                        value={overlayOpacity}
-                        onChange={(e) => setOverlayOpacity(Number(e.target.value))}
-                        className="w-24 accent-blue-600"
-                      />
-                      <span className="font-mono text-slate-900 font-medium tabular-nums w-9 text-right">
-                        {overlayOpacity}%
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                <div className="relative rounded-lg overflow-hidden border border-slate-200 bg-slate-900 aspect-[4/3]">
-                  <ResilientInfrastructureImage
-                    src={selectedAsset.image.storage_url}
-                    alt={selectedAsset.asset_name}
-                    className="w-full h-full object-cover"
-                  />
-
-                  <svg
-                    viewBox="0 0 100 100"
-                    preserveAspectRatio="none"
-                    className="absolute inset-0 w-full h-full pointer-events-none"
-                    style={{ opacity: overlayOpacity / 100 }}
-                  >
-                    <defs>
-                      <radialGradient id="gradcamHotspotPrimaryLight" cx="50%" cy="50%" r="50%">
-                        <stop offset="0%" stopColor="#EF4444" stopOpacity="0.88" />
-                        <stop offset="45%" stopColor="#F59E0B" stopOpacity="0.55" />
-                        <stop offset="80%" stopColor="#3B82F6" stopOpacity="0.25" />
-                        <stop offset="100%" stopColor="#1E3A8A" stopOpacity="0" />
-                      </radialGradient>
-                    </defs>
-
-                    {viewportLayer === 'yolo' && (
-                      <g>
-                        <rect
-                          x={selectedAsset.detection.bbox_xmin}
-                          y={selectedAsset.detection.bbox_ymin}
-                          width={
-                            selectedAsset.detection.bbox_xmax - selectedAsset.detection.bbox_xmin
-                          }
-                          height={
-                            selectedAsset.detection.bbox_ymax - selectedAsset.detection.bbox_ymin
-                          }
-                          fill="rgba(37, 99, 235, 0.14)"
-                          stroke="#38BDF8"
-                          strokeWidth="0.7"
-                          strokeDasharray="2,1"
-                        />
-                        <path
-                          d={`
-                            M ${selectedAsset.detection.bbox_xmin} ${selectedAsset.detection.bbox_ymin + 4}
-                            L ${selectedAsset.detection.bbox_xmin} ${selectedAsset.detection.bbox_ymin}
-                            L ${selectedAsset.detection.bbox_xmin + 4} ${selectedAsset.detection.bbox_ymin}
-                          `}
-                          fill="none"
-                          stroke="#38BDF8"
-                          strokeWidth="1.2"
-                        />
-                        <path
-                          d={`
-                            M ${selectedAsset.detection.bbox_xmax - 4} ${selectedAsset.detection.bbox_ymax}
-                            L ${selectedAsset.detection.bbox_xmax} ${selectedAsset.detection.bbox_ymax}
-                            L ${selectedAsset.detection.bbox_xmax} ${selectedAsset.detection.bbox_ymax - 4}
-                          `}
-                          fill="none"
-                          stroke="#38BDF8"
-                          strokeWidth="1.2"
-                        />
-                      </g>
-                    )}
-
-                    {viewportLayer === 'unet' && (
-                      <g>
-                        {selectedAsset.segmentation.svg_mask_paths.map((pathStr, idx) => (
-                          <g key={idx}>
-                            <path
-                              d={pathStr}
-                              fill="none"
-                              stroke="#EF4444"
-                              strokeWidth="3.2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              opacity="0.45"
-                            />
-                            <path
-                              d={pathStr}
-                              fill="none"
-                              stroke="#38BDF8"
-                              strokeWidth="0.9"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-                          </g>
-                        ))}
-                      </g>
-                    )}
-
-                    {viewportLayer === 'gradcam' && (
-                      <g>
-                        {selectedAsset.segmentation.gradcam_hotspots.map((spot, idx) => (
-                          <g key={idx}>
-                            <ellipse
-                              cx={spot.cx}
-                              cy={spot.cy}
-                              rx={spot.rx}
-                              ry={spot.ry}
-                              fill="url(#gradcamHotspotPrimaryLight)"
-                            />
-                            <circle
-                              cx={spot.cx}
-                              cy={spot.cy}
-                              r="1.2"
-                              fill="#FFFFFF"
-                              stroke="#DC2626"
-                              strokeWidth="0.5"
-                            />
-                          </g>
-                        ))}
-                      </g>
-                    )}
-                  </svg>
-
-                  <div className="absolute top-3 left-3 bg-black/80 border border-white/15 rounded px-3 py-2 text-xs font-mono text-white space-y-0.5">
-                    <div>
-                      {viewportLayer === 'raw' && 'MODE: RAW CALIBRATED RGB FRAME'}
-                      {viewportLayer === 'yolo' &&
-                        `YOLOv11x: ${selectedAsset.detection.defect_class} (${(
-                          selectedAsset.detection.confidence_score * 100
-                        ).toFixed(1)}%)`}
-                      {viewportLayer === 'unet' &&
-                        `U-NET MASK: DENSITY ${selectedAsset.segmentation.crack_density_pct}% · MAX ${selectedAsset.segmentation.max_width_mm}mm`}
-                      {viewportLayer === 'gradcam' &&
-                        `GRAD-CAM XAI: LAYER4 CONV ATTRIBUTION`}
-                    </div>
-                    <div className="text-[11px] text-slate-300">
-                      BBox: [{selectedAsset.detection.bbox_xmin}%,{' '}
-                      {selectedAsset.detection.bbox_ymin}%, {selectedAsset.detection.bbox_xmax}%,{' '}
-                      {selectedAsset.detection.bbox_ymax}%] · {selectedAsset.image.width_px}×
-                      {selectedAsset.image.height_px}px
-                    </div>
-                  </div>
-
-                  {viewportLayer === 'gradcam' && (
-                    <div className="absolute bottom-3 left-3 right-3 bg-black/80 border border-white/15 rounded px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
-                      {selectedAsset.segmentation.gradcam_hotspots.map((h, i) => (
-                        <div key={i} className="text-white">
-                          <span className="text-amber-300">
-                            Activation {(h.weight * 100).toFixed(0)}%:
-                          </span>{' '}
-                          {h.label}
-                        </div>
+            {inspectionSubTab === 'viewport' ? (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                <div className="lg:col-span-7 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 bg-white border border-slate-200 rounded-lg p-3">
+                    <div className="flex items-center gap-1 p-1 bg-slate-100 border border-slate-200 rounded-md overflow-x-auto">
+                      {(
+                        [
+                          { id: 'raw', label: 'Raw RGB' },
+                          { id: 'yolo', label: 'YOLO Multi-Class Boxes' },
+                          { id: 'unet', label: 'Crack Segmentation Mask' },
+                          { id: 'gradcam', label: 'Grad-CAM XAI' },
+                        ] as Array<{ id: ViewportLayer; label: string }>
+                      ).map((tab) => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => setViewportLayer(tab.id)}
+                          className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                            viewportLayer === tab.id
+                              ? 'bg-blue-600 text-white shadow-2xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
                       ))}
                     </div>
-                  )}
-                </div>
-              </div>
 
-              <div className="lg:col-span-5 space-y-6">
-                <div className="border border-slate-200 rounded-lg bg-white p-5 space-y-4">
-                  <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {viewportLayer !== 'raw' && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-slate-600 whitespace-nowrap">Opacity:</span>
+                          <input
+                            type="range"
+                            min={20}
+                            max={100}
+                            value={overlayOpacity}
+                            onChange={(e) => setOverlayOpacity(Number(e.target.value))}
+                            className="w-20 accent-blue-600"
+                          />
+                          <span className="font-mono text-slate-900 font-medium tabular-nums w-8 text-right">
+                            {overlayOpacity}%
+                          </span>
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadMaskSvg(selectedAsset)}
+                        className="px-2.5 py-1.5 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 rounded flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Export Mask SVG</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Active Pipeline Model Selectors & Baseline Classifier Readout */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-white border border-slate-200 rounded-lg p-3 text-xs">
+                    <div className="flex flex-col justify-center">
+                      <span className="text-[11px] text-slate-500">Baseline Binary Classifier</span>
+                      <span className="font-mono font-semibold text-slate-900">
+                        {selectedAsset.detection.baseline_classification?.label || 'Cracked'} (
+                        {(
+                          (selectedAsset.detection.baseline_classification?.confidence || 0.96) * 100
+                        ).toFixed(1)}
+                        %) · ResNet-50
+                      </span>
+                    </div>
                     <div>
-                      <h3 className="text-sm font-semibold text-slate-900">
-                        Quantitative Fracture Telemetry
-                      </h3>
-                      <p className="text-xs text-slate-500">
-                        Derived from U-Net medial skeleton & photogrammetric scale factor
-                      </p>
+                      <label className="block text-[11px] text-slate-500 mb-1">
+                        Detection Engine
+                      </label>
+                      <select
+                        value={activeDetectorModel}
+                        onChange={(e) =>
+                          setActiveDetectorModel(
+                            e.target.value as 'YOLOv11x' | 'YOLOv8x' | 'RT-DETR-L'
+                          )
+                        }
+                        className="w-full px-2.5 py-1 bg-slate-50 border border-slate-200 rounded text-slate-900 font-mono text-xs"
+                      >
+                        <option value="YOLOv11x">YOLOv11x (Selected · 94.6% mAP)</option>
+                        <option value="YOLOv8x">YOLOv8x (92.8% mAP)</option>
+                        <option value="RT-DETR-L">RT-DETR-L Transformer (93.9% mAP)</option>
+                      </select>
                     </div>
-                    <span className="font-mono text-xs font-semibold text-slate-800 tabular-nums">
-                      Health {selectedAsset.health_score}/100
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4 font-mono tabular-nums">
-                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                      <span className="block text-[11px] font-sans text-slate-500">
-                        Total Crack Length
-                      </span>
-                      <span className="text-base font-semibold text-slate-900">
-                        {selectedAsset.segmentation.crack_length_mm.toFixed(1)} mm
-                      </span>
-                    </div>
-                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                      <span className="block text-[11px] font-sans text-slate-500">
-                        Max Crack Width
-                      </span>
-                      <span className="text-base font-semibold text-amber-700">
-                        {selectedAsset.segmentation.max_width_mm.toFixed(2)} mm
-                      </span>
-                    </div>
-                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                      <span className="block text-[11px] font-sans text-slate-500">
-                        Mean Crack Width
-                      </span>
-                      <span className="text-base font-semibold text-slate-900">
-                        {selectedAsset.segmentation.avg_width_mm.toFixed(2)} mm
-                      </span>
-                    </div>
-                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                      <span className="block text-[11px] font-sans text-slate-500">
-                        Surface Crack Density
-                      </span>
-                      <span className="text-base font-semibold text-blue-600">
-                        {selectedAsset.segmentation.crack_density_pct.toFixed(1)}%
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="pt-2 text-xs text-slate-500 flex items-center justify-between">
-                    <span>Verification Status: {selectedAsset.assessment.approval_status}</span>
-                    <span>Reviewer: {selectedAsset.assessment.verified_by || 'Civil Engineer'}</span>
-                  </div>
-                </div>
-
-                <div className="border border-slate-200 rounded-lg bg-white p-5 space-y-4">
-                  <div className="flex items-center justify-between pb-3 border-b border-slate-200">
                     <div>
-                      <h3 className="text-sm font-semibold text-slate-900">
-                        Civil Engineer Override & Sign-Off
-                      </h3>
-                      <p className="text-xs font-mono text-slate-500">
-                        POST /api/v1/assessments/{selectedAsset.assessment.assessment_id}/override
-                      </p>
+                      <label className="block text-[11px] text-slate-500 mb-1">
+                        Segmentation Engine
+                      </label>
+                      <select
+                        value={activeSegModel}
+                        onChange={(e) =>
+                          setActiveSegModel(
+                            e.target.value as 'SegFormer-B2' | 'Attention U-Net' | 'Swin-UNet'
+                          )
+                        }
+                        className="w-full px-2.5 py-1 bg-slate-50 border border-slate-200 rounded text-slate-900 font-mono text-xs"
+                      >
+                        <option value="SegFormer-B2">SegFormer-B2 (Selected · 0.879 IoU)</option>
+                        <option value="Attention U-Net">Attention U-Net (0.842 IoU)</option>
+                        <option value="Swin-UNet">Swin-UNet (0.864 IoU)</option>
+                      </select>
                     </div>
-                    {!activePermissions.canOverrideAI && (
-                      <span className="flex items-center gap-1 text-xs font-medium text-amber-700">
-                        <Lock className="w-3.5 h-3.5" />
-                        <span>Read-Only Role</span>
-                      </span>
+                  </div>
+
+                  <div className="relative rounded-lg overflow-hidden border border-slate-200 bg-slate-900 aspect-[4/3]">
+                    <ResilientInfrastructureImage
+                      src={selectedAsset.image.storage_url}
+                      alt={selectedAsset.asset_name}
+                      className="w-full h-full object-cover"
+                    />
+
+                    <svg
+                      viewBox="0 0 100 100"
+                      preserveAspectRatio="none"
+                      className="absolute inset-0 w-full h-full pointer-events-none"
+                      style={{ opacity: overlayOpacity / 100 }}
+                    >
+                      <defs>
+                        <radialGradient id="gradcamHotspotPrimaryLight" cx="50%" cy="50%" r="50%">
+                          <stop offset="0%" stopColor="#EF4444" stopOpacity="0.88" />
+                          <stop offset="45%" stopColor="#F59E0B" stopOpacity="0.55" />
+                          <stop offset="80%" stopColor="#3B82F6" stopOpacity="0.25" />
+                          <stop offset="100%" stopColor="#1E3A8A" stopOpacity="0" />
+                        </radialGradient>
+                      </defs>
+
+                      {viewportLayer === 'yolo' && (
+                        <g>
+                          {(selectedAsset.detection.multi_class_boxes &&
+                          selectedAsset.detection.multi_class_boxes.length > 0
+                            ? selectedAsset.detection.multi_class_boxes
+                            : [
+                                {
+                                  label: selectedAsset.detection.defect_class,
+                                  confidence: selectedAsset.detection.confidence_score,
+                                  xmin: selectedAsset.detection.bbox_xmin,
+                                  ymin: selectedAsset.detection.bbox_ymin,
+                                  xmax: selectedAsset.detection.bbox_xmax,
+                                  ymax: selectedAsset.detection.bbox_ymax,
+                                },
+                              ]
+                          ).map((box, idx) => {
+                            const strokeHex =
+                              idx === 0 ? '#38BDF8' : idx === 1 ? '#F59E0B' : '#A78BFA';
+                            return (
+                              <g key={idx}>
+                                <rect
+                                  x={box.xmin}
+                                  y={box.ymin}
+                                  width={box.xmax - box.xmin}
+                                  height={box.ymax - box.ymin}
+                                  fill={
+                                    idx === 0
+                                      ? 'rgba(37, 99, 235, 0.14)'
+                                      : 'rgba(245, 158, 11, 0.12)'
+                                  }
+                                  stroke={strokeHex}
+                                  strokeWidth="0.7"
+                                  strokeDasharray={idx === 0 ? '2,1' : undefined}
+                                />
+                                <rect
+                                  x={box.xmin}
+                                  y={Math.max(box.ymin - 4.4, 0.5)}
+                                  width={34}
+                                  height={4.2}
+                                  rx={0.6}
+                                  fill="rgba(15, 23, 42, 0.88)"
+                                />
+                                <text
+                                  x={box.xmin + 1.2}
+                                  y={Math.max(box.ymin - 1.5, 3.2)}
+                                  fill="#FFFFFF"
+                                  fontSize="2.4"
+                                  fontFamily="monospace"
+                                >
+                                  {box.label} {(box.confidence * 100).toFixed(0)}%
+                                </text>
+                              </g>
+                            );
+                          })}
+                        </g>
+                      )}
+
+                      {viewportLayer === 'unet' && (
+                        <g>
+                          {selectedAsset.segmentation.svg_mask_paths.map((pathStr, idx) => (
+                            <g key={idx}>
+                              <path
+                                d={pathStr}
+                                fill="none"
+                                stroke="#EF4444"
+                                strokeWidth="3.2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                opacity="0.45"
+                              />
+                              <path
+                                d={pathStr}
+                                fill="none"
+                                stroke="#38BDF8"
+                                strokeWidth="0.9"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </g>
+                          ))}
+                        </g>
+                      )}
+
+                      {viewportLayer === 'gradcam' && (
+                        <g>
+                          {selectedAsset.segmentation.gradcam_hotspots.map((spot, idx) => (
+                            <g key={idx}>
+                              <ellipse
+                                cx={spot.cx}
+                                cy={spot.cy}
+                                rx={spot.rx}
+                                ry={spot.ry}
+                                fill="url(#gradcamHotspotPrimaryLight)"
+                              />
+                              <circle
+                                cx={spot.cx}
+                                cy={spot.cy}
+                                r="1.2"
+                                fill="#FFFFFF"
+                                stroke="#DC2626"
+                                strokeWidth="0.5"
+                              />
+                            </g>
+                          ))}
+                        </g>
+                      )}
+                    </svg>
+
+                    <div className="absolute top-3 left-3 bg-black/80 border border-white/15 rounded px-3 py-2 text-xs font-mono text-white space-y-0.5">
+                      <div>
+                        {viewportLayer === 'raw' && 'MODE: RAW CALIBRATED RGB FRAME'}
+                        {viewportLayer === 'yolo' &&
+                          `${activeDetectorModel}: ${selectedAsset.detection.defect_class} (${(
+                            selectedAsset.detection.confidence_score * 100
+                          ).toFixed(1)}%) · ${
+                            selectedAsset.detection.multi_class_boxes?.length || 1
+                          } Detections`}
+                        {viewportLayer === 'unet' &&
+                          `${activeSegModel}: DENSITY ${selectedAsset.segmentation.crack_density_pct}% · IoU ${
+                            selectedAsset.segmentation.segmentation_metrics?.iou ?? 0.86
+                          }`}
+                        {viewportLayer === 'gradcam' && 'GRAD-CAM XAI: LAYER4 CONV ATTRIBUTION'}
+                      </div>
+                      <div className="text-[11px] text-slate-300">
+                        BBox: [{selectedAsset.detection.bbox_xmin}%,{' '}
+                        {selectedAsset.detection.bbox_ymin}%, {selectedAsset.detection.bbox_xmax}%,{' '}
+                        {selectedAsset.detection.bbox_ymax}%] · {selectedAsset.image.width_px}×
+                        {selectedAsset.image.height_px}px
+                      </div>
+                    </div>
+
+                    {viewportLayer === 'gradcam' && (
+                      <div className="absolute bottom-3 left-3 right-3 bg-black/80 border border-white/15 rounded px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+                        {selectedAsset.segmentation.gradcam_hotspots.map((h, i) => (
+                          <div key={i} className="text-white">
+                            <span className="text-amber-300">
+                              Activation {(h.weight * 100).toFixed(0)}%:
+                            </span>{' '}
+                            {h.label}
+                          </div>
+                        ))}
+                      </div>
                     )}
                   </div>
+                </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-                    <div>
-                      <label className="block text-slate-600 font-medium mb-1">
-                        Defect Class
-                      </label>
-                      <select
-                        disabled={!activePermissions.canOverrideAI}
-                        value={overrideDefectClass}
-                        onChange={(e) => setOverrideDefectClass(e.target.value as DefectClassType)}
-                        className="w-full px-2.5 py-2 bg-slate-50 border border-slate-300 rounded text-slate-900 disabled:opacity-50"
-                      >
-                        <option value="D00 Longitudinal">D00 Longitudinal</option>
-                        <option value="D10 Transverse">D10 Transverse</option>
-                        <option value="D20 Alligator">D20 Alligator</option>
-                        <option value="D40 Pothole">D40 Pothole</option>
-                        <option value="Spalling">Spalling</option>
-                      </select>
+                <div className="lg:col-span-5 space-y-5">
+                  <div className="border border-slate-200 rounded-lg bg-white p-5 space-y-4">
+                    <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Quantitative Fracture & Geometry Telemetry
+                        </h3>
+                        <p className="text-xs text-slate-500">
+                          {selectedAsset.image.is_calibrated === false
+                            ? 'Uncalibrated pixel-space skeleton metrics'
+                            : 'Derived from U-Net medial skeleton & photogrammetric scale factor'}
+                        </p>
+                      </div>
+                      <span className="font-mono text-xs font-semibold text-slate-800 tabular-nums">
+                        Health {selectedAsset.health_score}/100
+                      </span>
                     </div>
 
-                    <div>
-                      <label className="block text-slate-600 font-medium mb-1">
-                        Severity Level
-                      </label>
-                      <select
-                        disabled={!activePermissions.canOverrideAI}
-                        value={overrideSeverity}
-                        onChange={(e) =>
-                          setOverrideSeverity(e.target.value as SeverityLevelType)
-                        }
-                        className="w-full px-2.5 py-2 bg-slate-50 border border-slate-300 rounded text-slate-900 disabled:opacity-50"
-                      >
-                        <option value="Minor">Minor</option>
-                        <option value="Moderate">Moderate</option>
-                        <option value="Severe">Severe</option>
-                        <option value="Critical">Critical</option>
-                      </select>
+                    <div className="grid grid-cols-2 gap-3 font-mono tabular-nums">
+                      <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                        <span className="block text-[11px] font-sans text-slate-500">
+                          Total Crack Length
+                        </span>
+                        <span className="text-base font-semibold text-slate-900">
+                          {selectedAsset.image.is_calibrated === false
+                            ? `${
+                                selectedAsset.segmentation.crack_geometry?.skeleton_length_px ??
+                                Math.round(selectedAsset.segmentation.crack_length_mm * 2.8)
+                              } px`
+                            : `${selectedAsset.segmentation.crack_length_mm.toFixed(1)} mm`}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                        <span className="block text-[11px] font-sans text-slate-500">
+                          Max Crack Width
+                        </span>
+                        <span className="text-base font-semibold text-amber-700">
+                          {selectedAsset.image.is_calibrated === false
+                            ? `${
+                                selectedAsset.segmentation.crack_geometry?.max_aperture_px ?? 12.4
+                              } px`
+                            : `${selectedAsset.segmentation.max_width_mm.toFixed(2)} mm`}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                        <span className="block text-[11px] font-sans text-slate-500">
+                          Mean Crack Width
+                        </span>
+                        <span className="text-base font-semibold text-slate-900">
+                          {selectedAsset.image.is_calibrated === false
+                            ? `${
+                                selectedAsset.segmentation.crack_geometry?.mean_aperture_px ?? 6.2
+                              } px`
+                            : `${selectedAsset.segmentation.avg_width_mm.toFixed(2)} mm`}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                        <span className="block text-[11px] font-sans text-slate-500">
+                          Surface Crack Density
+                        </span>
+                        <span className="text-base font-semibold text-blue-600">
+                          {selectedAsset.segmentation.crack_density_pct.toFixed(1)}%
+                        </span>
+                      </div>
                     </div>
 
-                    <div>
-                      <label className="block text-slate-600 font-medium mb-1">
-                        Priority
-                      </label>
-                      <select
-                        disabled={!activePermissions.canOverrideAI}
-                        value={overridePriority}
-                        onChange={(e) => setOverridePriority(e.target.value as PriorityType)}
-                        className="w-full px-2.5 py-2 bg-slate-50 border border-slate-300 rounded text-slate-900 disabled:opacity-50"
-                      >
-                        <option value="Routine">Routine</option>
-                        <option value="Scheduled">Scheduled</option>
-                        <option value="Urgent">Urgent</option>
-                        <option value="Immediate">Immediate</option>
-                      </select>
+                    {/* Crack Geometry Extraction */}
+                    {selectedAsset.segmentation.crack_geometry && (
+                      <div className="pt-3 border-t border-slate-200">
+                        <div className="text-[11px] font-semibold text-slate-700 mb-2">
+                          Crack Geometry Extraction (Medial Axis & Topology)
+                        </div>
+                        <div className="grid grid-cols-4 gap-2 text-center font-mono text-xs tabular-nums">
+                          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+                            <span className="block text-[10px] font-sans text-slate-500">
+                              Tortuosity
+                            </span>
+                            <span className="font-semibold text-slate-900">
+                              {selectedAsset.segmentation.crack_geometry.tortuosity_index}
+                            </span>
+                          </div>
+                          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+                            <span className="block text-[10px] font-sans text-slate-500">
+                              Orientation
+                            </span>
+                            <span className="font-semibold text-slate-900">
+                              {selectedAsset.segmentation.crack_geometry.dominant_orientation_deg}°
+                            </span>
+                          </div>
+                          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+                            <span className="block text-[10px] font-sans text-slate-500">
+                              Branches
+                            </span>
+                            <span className="font-semibold text-slate-900">
+                              {selectedAsset.segmentation.crack_geometry.branch_count}
+                            </span>
+                          </div>
+                          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+                            <span className="block text-[10px] font-sans text-slate-500">
+                              Junctions
+                            </span>
+                            <span className="font-semibold text-slate-900">
+                              {selectedAsset.segmentation.crack_geometry.junction_nodes}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Segmentation Evaluation Metrics */}
+                    {selectedAsset.segmentation.segmentation_metrics && (
+                      <div className="pt-3 border-t border-slate-200">
+                        <div className="text-[11px] font-semibold text-slate-700 mb-2">
+                          Segmentation Quality Metrics ({activeSegModel})
+                        </div>
+                        <div className="grid grid-cols-5 gap-1.5 text-center font-mono text-xs tabular-nums">
+                          <div className="p-1.5 bg-slate-50 border border-slate-200 rounded">
+                            <span className="block text-[10px] font-sans text-slate-500">IoU</span>
+                            <span className="font-semibold text-emerald-700">
+                              {selectedAsset.segmentation.segmentation_metrics.iou}
+                            </span>
+                          </div>
+                          <div className="p-1.5 bg-slate-50 border border-slate-200 rounded">
+                            <span className="block text-[10px] font-sans text-slate-500">Dice</span>
+                            <span className="font-semibold text-slate-900">
+                              {selectedAsset.segmentation.segmentation_metrics.dice}
+                            </span>
+                          </div>
+                          <div className="p-1.5 bg-slate-50 border border-slate-200 rounded">
+                            <span className="block text-[10px] font-sans text-slate-500">
+                              Px Acc
+                            </span>
+                            <span className="font-semibold text-slate-900">
+                              {selectedAsset.segmentation.segmentation_metrics.pixel_accuracy}%
+                            </span>
+                          </div>
+                          <div className="p-1.5 bg-slate-50 border border-slate-200 rounded">
+                            <span className="block text-[10px] font-sans text-slate-500">
+                              B-F1
+                            </span>
+                            <span className="font-semibold text-slate-900">
+                              {selectedAsset.segmentation.segmentation_metrics.boundary_f1}
+                            </span>
+                          </div>
+                          <div className="p-1.5 bg-slate-50 border border-slate-200 rounded">
+                            <span className="block text-[10px] font-sans text-slate-500">
+                              Mask px
+                            </span>
+                            <span className="font-semibold text-slate-900">
+                              {(
+                                selectedAsset.segmentation.segmentation_metrics.mask_area_px / 1000
+                              ).toFixed(0)}
+                              k
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="pt-2 text-xs text-slate-500 flex items-center justify-between">
+                      <span>Verification Status: {selectedAsset.assessment.approval_status}</span>
+                      <span>Reviewer: {selectedAsset.assessment.verified_by || 'Civil Engineer'}</span>
                     </div>
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">
-                      Structural Engineering Assessment & Remediation Directive
-                    </label>
-                    <textarea
-                      rows={3}
-                      disabled={!activePermissions.canOverrideAI}
-                      value={overrideComments}
-                      onChange={(e) => setOverrideComments(e.target.value)}
-                      className="w-full p-3 text-xs bg-slate-50 border border-slate-300 rounded text-slate-900 focus:outline-none focus:border-blue-600 focus:bg-white disabled:opacity-50"
-                    />
-                  </div>
+                  <div className="border border-slate-200 rounded-lg bg-white p-5 space-y-4">
+                    <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Civil Engineer Override & Sign-Off
+                        </h3>
+                        <p className="text-xs font-mono text-slate-500">
+                          POST /api/v1/assessments/{selectedAsset.assessment.assessment_id}/override
+                        </p>
+                      </div>
+                      {!activePermissions.canOverrideAI && (
+                        <span className="flex items-center gap-1 text-xs font-medium text-amber-700">
+                          <Lock className="w-3.5 h-3.5" />
+                          <span>Read-Only Role</span>
+                        </span>
+                      )}
+                    </div>
 
-                  <div className="flex flex-wrap items-center gap-2 pt-2">
-                    <button
-                      type="button"
-                      disabled={isSavingOverride}
-                      onClick={() => handleEngineeringOverride('Approved')}
-                      className="px-3.5 py-2 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      Approve Assessment
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isSavingOverride}
-                      onClick={() => handleEngineeringOverride('Reclassified')}
-                      className="px-3.5 py-2 text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      Reclassify & Update
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isSavingOverride}
-                      onClick={() => {
-                        setOverrideSeverity('Critical');
-                        setOverridePriority('Immediate');
-                        handleEngineeringOverride('Escalated');
-                      }}
-                      className="px-3.5 py-2 text-xs font-semibold bg-red-600 hover:bg-red-700 text-white rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      Escalate Immediate
-                    </button>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                      <div>
+                        <label className="block text-slate-600 font-medium mb-1">
+                          Defect Class
+                        </label>
+                        <select
+                          disabled={!activePermissions.canOverrideAI}
+                          value={overrideDefectClass}
+                          onChange={(e) => setOverrideDefectClass(e.target.value as DefectClassType)}
+                          className="w-full px-2.5 py-2 bg-slate-50 border border-slate-300 rounded text-slate-900 disabled:opacity-50"
+                        >
+                          <option value="D00 Longitudinal">D00 Longitudinal</option>
+                          <option value="D10 Transverse">D10 Transverse</option>
+                          <option value="D20 Alligator">D20 Alligator</option>
+                          <option value="D40 Pothole">D40 Pothole</option>
+                          <option value="Spalling">Spalling</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-600 font-medium mb-1">
+                          Severity Level
+                        </label>
+                        <select
+                          disabled={!activePermissions.canOverrideAI}
+                          value={overrideSeverity}
+                          onChange={(e) =>
+                            setOverrideSeverity(e.target.value as SeverityLevelType)
+                          }
+                          className="w-full px-2.5 py-2 bg-slate-50 border border-slate-300 rounded text-slate-900 disabled:opacity-50"
+                        >
+                          <option value="Minor">Minor</option>
+                          <option value="Moderate">Moderate</option>
+                          <option value="Severe">Severe</option>
+                          <option value="Critical">Critical</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-600 font-medium mb-1">Priority</label>
+                        <select
+                          disabled={!activePermissions.canOverrideAI}
+                          value={overridePriority}
+                          onChange={(e) => setOverridePriority(e.target.value as PriorityType)}
+                          className="w-full px-2.5 py-2 bg-slate-50 border border-slate-300 rounded text-slate-900 disabled:opacity-50"
+                        >
+                          <option value="Routine">Routine</option>
+                          <option value="Scheduled">Scheduled</option>
+                          <option value="Urgent">Urgent</option>
+                          <option value="Immediate">Immediate</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">
+                        Structural Engineering Assessment & Remediation Directive
+                      </label>
+                      <textarea
+                        rows={3}
+                        disabled={!activePermissions.canOverrideAI}
+                        value={overrideComments}
+                        onChange={(e) => setOverrideComments(e.target.value)}
+                        className="w-full p-3 text-xs bg-slate-50 border border-slate-300 rounded text-slate-900 focus:outline-none focus:border-blue-600 focus:bg-white disabled:opacity-50"
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 pt-2">
+                      <button
+                        type="button"
+                        disabled={isSavingOverride}
+                        onClick={() => handleEngineeringOverride('Approved')}
+                        className="px-3.5 py-2 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Approve Assessment
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isSavingOverride}
+                        onClick={() => handleEngineeringOverride('Reclassified')}
+                        className="px-3.5 py-2 text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Reclassify & Update
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isSavingOverride}
+                        onClick={() => {
+                          setOverrideSeverity('Critical');
+                          setOverridePriority('Immediate');
+                          handleEngineeringOverride('Escalated');
+                        }}
+                        className="px-3.5 py-2 text-xs font-semibold bg-red-600 hover:bg-red-700 text-white rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Escalate Immediate
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
+            ) : (
+              /* MODEL BENCHMARKS, TRAINING & EVALUATION REPORT SUB-TAB */
+              benchmarksData && (
+                <div className="space-y-6">
+                  {/* Best Selected Summary Callouts */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="bg-white border border-slate-200 rounded-lg p-4">
+                      <span className="text-[11px] font-medium text-slate-500">
+                        Best Baseline Classifier
+                      </span>
+                      <div className="text-sm font-semibold text-slate-900 mt-1">
+                        {benchmarksData.summary.best_baseline_classifier}
+                      </div>
+                      <span className="text-xs font-mono text-emerald-700">
+                        SDNET2018 Binary Crack Triage
+                      </span>
+                    </div>
+                    <div className="bg-white border border-slate-200 rounded-lg p-4">
+                      <span className="text-[11px] font-medium text-slate-500">
+                        Best Multi-Class Detector
+                      </span>
+                      <div className="text-sm font-semibold text-slate-900 mt-1">
+                        {benchmarksData.summary.best_detector}
+                      </div>
+                      <span className="text-xs font-mono text-blue-600">
+                        RDD2022 + Spalling Detection
+                      </span>
+                    </div>
+                    <div className="bg-white border border-slate-200 rounded-lg p-4">
+                      <span className="text-[11px] font-medium text-slate-500">
+                        Best Baseline Segmentation
+                      </span>
+                      <div className="text-sm font-semibold text-slate-900 mt-1">
+                        {benchmarksData.summary.best_baseline_segmentation}
+                      </div>
+                      <span className="text-xs font-mono text-slate-700">
+                        Crack500 + DeepCrack Masks
+                      </span>
+                    </div>
+                    <div className="bg-white border border-slate-200 rounded-lg p-4">
+                      <span className="text-[11px] font-medium text-slate-500">
+                        Best Advanced Transformer
+                      </span>
+                      <div className="text-sm font-semibold text-slate-900 mt-1">
+                        {benchmarksData.summary.best_advanced_transformer}
+                      </div>
+                      <span className="text-xs font-mono text-emerald-700">
+                        Selected Production Backbone
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Interactive Epoch Training & Evaluation Report Bar */}
+                  <form
+                    onSubmit={handleTrainModel}
+                    className="bg-white border border-slate-200 rounded-lg p-4 flex flex-wrap items-center justify-between gap-4"
+                  >
+                    <div className="flex flex-wrap items-center gap-3 text-xs">
+                      <span className="font-semibold text-slate-900 flex items-center gap-1.5">
+                        <Play className="w-3.5 h-3.5 text-blue-600" />
+                        <span>Run Training / Evaluation Pass:</span>
+                      </span>
+                      <select
+                        value={trainModelId}
+                        onChange={(e) => setTrainModelId(e.target.value)}
+                        className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded text-slate-900 font-medium"
+                      >
+                        {benchmarksData.models.map((m) => (
+                          <option key={m.model_id} value={m.model_id}>
+                            {m.name} ({m.family})
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={trainEpochs}
+                        onChange={(e) => setTrainEpochs(Number(e.target.value))}
+                        className="px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded text-slate-900 font-mono"
+                      >
+                        <option value={5}>+5 Epochs</option>
+                        <option value={10}>+10 Epochs</option>
+                        <option value={25}>+25 Epochs</option>
+                      </select>
+                      <button
+                        type="submit"
+                        disabled={isTrainingModel}
+                        className="px-3.5 py-1.5 text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        {isTrainingModel ? 'Evaluating...' : 'Train & Evaluate'}
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleExportModelReport}
+                      className="px-3.5 py-1.5 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-900 rounded flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Export Model Eval Report (JSON)</span>
+                    </button>
+                  </form>
+
+                  {/* 3 Grouped Model Comparison Tables */}
+                  {(
+                    [
+                      'Baseline Classification',
+                      'Object Detection',
+                      'Segmentation & Advanced CNN/Transformer',
+                    ] as const
+                  ).map((family) => {
+                    const familyModels = benchmarksData.models.filter((m) => m.family === family);
+                    return (
+                      <div
+                        key={family}
+                        className="bg-white border border-slate-200 rounded-lg overflow-hidden"
+                      >
+                        <div className="px-5 py-3 border-b border-slate-200 bg-slate-50/70 flex items-center justify-between">
+                          <h3 className="text-sm font-semibold text-slate-900">{family}</h3>
+                          <span className="text-xs font-mono text-slate-500">
+                            {familyModels.length} Evaluated Architectures
+                          </span>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse text-xs">
+                            <thead>
+                              <tr className="border-b border-slate-200 text-[11px] font-semibold text-slate-500">
+                                <th className="py-2.5 px-4">Model Architecture</th>
+                                <th className="py-2.5 px-3">Dataset</th>
+                                <th className="py-2.5 px-3 text-right">Primary Metric</th>
+                                <th className="py-2.5 px-3 text-right">Secondary</th>
+                                <th className="py-2.5 px-3 text-right">Prec / Rec</th>
+                                <th className="py-2.5 px-3 text-right">F1 / Dice</th>
+                                <th className="py-2.5 px-3 text-right">Latency</th>
+                                <th className="py-2.5 px-3 text-right">Epochs</th>
+                                <th className="py-2.5 px-4 text-right">Selection</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-200/70 font-mono tabular-nums">
+                              {familyModels.map((m) => (
+                                <tr key={m.model_id} className="hover:bg-slate-50">
+                                  <td className="py-3 px-4 font-sans">
+                                    <div className="font-semibold text-slate-900">{m.name}</div>
+                                    <div className="text-[11px] text-slate-500">
+                                      {m.architecture} · {m.params_m}M params
+                                    </div>
+                                  </td>
+                                  <td className="py-3 px-3 font-sans text-slate-600">{m.dataset}</td>
+                                  <td className="py-3 px-3 text-right font-semibold text-blue-600">
+                                    {m.primary_metric_value} ({m.primary_metric_name})
+                                  </td>
+                                  <td className="py-3 px-3 text-right text-slate-800">
+                                    {m.secondary_metric_value} ({m.secondary_metric_name})
+                                  </td>
+                                  <td className="py-3 px-3 text-right text-slate-700">
+                                    {m.precision}% / {m.recall}%
+                                  </td>
+                                  <td className="py-3 px-3 text-right text-slate-900">
+                                    {m.f1_or_dice}%
+                                  </td>
+                                  <td className="py-3 px-3 text-right text-slate-700">
+                                    {m.latency_ms} ms
+                                  </td>
+                                  <td className="py-3 px-3 text-right text-slate-700">
+                                    {m.epochs_trained}
+                                  </td>
+                                  <td className="py-3 px-4 text-right font-sans">
+                                    {m.is_selected ? (
+                                      <span className="text-xs font-semibold text-emerald-700">
+                                        Selected Active
+                                      </span>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSelectModel(m.model_id)}
+                                        className="px-2.5 py-1 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 rounded cursor-pointer"
+                                      >
+                                        Select Model
+                                      </button>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Epoch Convergence SVG Chart & Per-Class AP Matrix */}
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    <div className="lg:col-span-6 bg-white border border-slate-200 rounded-lg p-5 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Training Epoch Convergence (IoU & mAP)
+                        </h3>
+                        <span className="text-[11px] font-mono text-slate-500">Epochs 1 → 80</span>
+                      </div>
+                      <svg viewBox="0 0 400 180" className="w-full h-44 bg-slate-50 rounded border border-slate-200">
+                        {[0.5, 0.7, 0.9].map((v) => {
+                          const y = 160 - (v - 0.4) * 240;
+                          return (
+                            <g key={v}>
+                              <line x1="36" y1={y} x2="386" y2={y} stroke="#E2E8F0" strokeDasharray="3,3" />
+                              <text x="6" y={y + 3} fontSize="9" fill="#64748B" fontFamily="monospace">
+                                {(v * 100).toFixed(0)}%
+                              </text>
+                            </g>
+                          );
+                        })}
+                        <polyline
+                          fill="none"
+                          stroke="#2563EB"
+                          strokeWidth="2.2"
+                          points={benchmarksData.epoch_curve
+                            .map(
+                              (pt, i) =>
+                                `${40 + i * 48},${160 - (pt.segformer_iou - 0.4) * 240}`
+                            )
+                            .join(' ')}
+                        />
+                        <polyline
+                          fill="none"
+                          stroke="#10B981"
+                          strokeWidth="2"
+                          points={benchmarksData.epoch_curve
+                            .map((pt, i) => `${40 + i * 48},${160 - (pt.yolo_map - 0.4) * 240}`)
+                            .join(' ')}
+                        />
+                        <polyline
+                          fill="none"
+                          stroke="#F59E0B"
+                          strokeWidth="1.8"
+                          strokeDasharray="4,2"
+                          points={benchmarksData.epoch_curve
+                            .map((pt, i) => `${40 + i * 48},${160 - (pt.unet_iou - 0.4) * 240}`)
+                            .join(' ')}
+                        />
+                      </svg>
+                      <div className="flex flex-wrap items-center gap-4 text-[11px] font-mono text-slate-600">
+                        <span className="text-blue-600 font-semibold">— SegFormer-B2 IoU</span>
+                        <span className="text-emerald-700 font-semibold">— YOLOv11x mAP@50</span>
+                        <span className="text-amber-700 font-semibold">-- Attention U-Net IoU</span>
+                      </div>
+                    </div>
+
+                    <div className="lg:col-span-6 bg-white border border-slate-200 rounded-lg p-5 space-y-3">
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        Multi-Class Surface Defect Performance Breakdown
+                      </h3>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse text-xs font-mono tabular-nums">
+                          <thead>
+                            <tr className="border-b border-slate-200 text-[11px] font-sans font-semibold text-slate-500">
+                              <th className="py-2 pr-3">Defect Class</th>
+                              <th className="py-2 px-2 text-right">YOLOv11 AP</th>
+                              <th className="py-2 px-2 text-right">SegFormer IoU</th>
+                              <th className="py-2 px-2 text-right">U-Net IoU</th>
+                              <th className="py-2 pl-2 text-right">Samples</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-200/70">
+                            {benchmarksData.per_class_ap.map((row) => (
+                              <tr key={row.defect_class}>
+                                <td className="py-2.5 pr-3 font-sans font-medium text-slate-900">
+                                  {row.defect_class}
+                                </td>
+                                <td className="py-2.5 px-2 text-right text-blue-600 font-semibold">
+                                  {row.ap_yolov11}%
+                                </td>
+                                <td className="py-2.5 px-2 text-right text-emerald-700 font-semibold">
+                                  {row.iou_segformer}
+                                </td>
+                                <td className="py-2.5 px-2 text-right text-slate-700">
+                                  {row.iou_unet}
+                                </td>
+                                <td className="py-2.5 pl-2 text-right text-slate-500">
+                                  {row.samples}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            )}
           </div>
         )}
 
@@ -2790,198 +3769,521 @@ export default function App() {
             <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 pb-5 border-b border-slate-200">
               <div>
                 <p className="text-xs font-medium text-blue-600 mb-1">
-                  05. Structural Compliance Dossier · PE Sign-Off & PostGIS Export
+                  05. Damage Analytics, Deliverable Verification & PE Compliance Export
                 </p>
                 <h1 className="text-2xl font-semibold text-slate-900 tracking-tight">
-                  Report Export & Compliance Summary
+                  {reportsSubTab === 'analytics'
+                    ? 'Damage Analytics & Tasks Verification Matrix'
+                    : 'Report Export & Compliance Summary'}
                 </h1>
                 <p className="text-sm text-slate-600 mt-1 max-w-2xl">
-                  Generate auditable structural condition reports with YOLOv11/U-Net quantitative
-                  metrics, Grad-CAM XAI verification records, and Professional Engineer sign-off.
+                  Portfolio-wide fracture telemetry, multi-class damage distribution, verification of
+                  all 21 Tasks & 17 Expected Outcomes, and auditable PE sign-off dossiers.
                 </p>
               </div>
 
               <div className="flex flex-wrap items-center gap-3 shrink-0">
+                <div className="flex items-center gap-1 p-1 bg-slate-100 border border-slate-200 rounded-lg">
+                  <button
+                    type="button"
+                    onClick={() => setReportsSubTab('analytics')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      reportsSubTab === 'analytics'
+                        ? 'bg-white text-slate-900 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Damage Analytics & Tasks
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setReportsSubTab('compliance')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      reportsSubTab === 'compliance'
+                        ? 'bg-white text-slate-900 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Compliance Reports
+                  </button>
+                </div>
+
                 <button
                   type="button"
                   onClick={handleDownloadCsv}
-                  className="px-4 py-2 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+                  className="px-3.5 py-2 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Download CSV Ledger</span>
+                  <span>CSV Ledger</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => window.print()}
-                  className="px-4 py-2 text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+                  className="px-3.5 py-2 text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5" />
-                  <span>Print / Save PDF Dossier</span>
+                  <span>Print PDF</span>
                 </button>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-              <div className="lg:col-span-4 border border-slate-200 rounded-lg bg-white p-5 space-y-5">
-                <h3 className="text-sm font-semibold text-slate-900 pb-3 border-b border-slate-200 flex items-center gap-2">
-                  <FileCheck2 className="w-4 h-4 text-blue-600" />
-                  <span>Compliance Export Configuration</span>
-                </h3>
-
-                <div className="space-y-4 text-xs">
-                  <div>
-                    <label className="block font-medium text-slate-700 mb-1.5">
-                      Included Asset Scope
-                    </label>
-                    <select
-                      value={reportScope}
-                      onChange={(e) =>
-                        setReportScope(e.target.value as 'all' | 'critical_severe')
-                      }
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-md text-slate-900"
-                    >
-                      <option value="all">
-                        Full Civil Infrastructure Inventory ({assets.length})
-                      </option>
-                      <option value="critical_severe">
-                        Critical & Severe Remediation Queue Only ({portfolioStats.criticalOrSevere})
-                      </option>
-                    </select>
-                  </div>
-
-                  <div className="space-y-2 pt-2">
-                    <label className="flex items-center gap-2 text-slate-700 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={includeXaiAppendix}
-                        onChange={(e) => setIncludeXaiAppendix(e.target.checked)}
-                        className="accent-blue-600"
-                      />
-                      <span>Include Grad-CAM XAI Attribution Coordinates</span>
-                    </label>
-                    <label className="flex items-center gap-2 text-slate-700 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={includePostgisCoords}
-                        onChange={(e) => setIncludePostgisCoords(e.target.checked)}
-                        className="accent-blue-600"
-                      />
-                      <span>Include PostGIS EPSG:4326 Spatial Coordinates</span>
-                    </label>
-                  </div>
-
-                  <div className="pt-4 border-t border-slate-200 space-y-3">
-                    <h4 className="font-semibold text-slate-900">
-                      Certifying Civil Engineer Sign-Off
-                    </h4>
-                    <div>
-                      <label className="block text-slate-600 mb-1">Engineer Full Name</label>
-                      <input
-                        type="text"
-                        value={engineerSignOffName}
-                        onChange={(e) => setEngineerSignOffName(e.target.value)}
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-md text-slate-900"
-                      />
+            {reportsSubTab === 'analytics' ? (
+              <div className="space-y-6">
+                {/* Portfolio Damage Analytics KPI Strip */}
+                {analyticsSummary && (
+                  <>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                      <div className="bg-white border border-slate-200 rounded-lg p-4">
+                        <span className="text-xs text-slate-500">Total Mapped Crack Length</span>
+                        <div className="text-xl font-semibold font-mono text-slate-900 tabular-nums mt-1">
+                          {analyticsSummary.total_crack_length_mm.toLocaleString()} mm
+                        </div>
+                        <span className="text-[11px] font-mono text-slate-500">
+                          Mean Density {analyticsSummary.mean_crack_density_pct}%
+                        </span>
+                      </div>
+                      <div className="bg-white border border-slate-200 rounded-lg p-4">
+                        <span className="text-xs text-slate-500">Peak Observed Aperture</span>
+                        <div className="text-xl font-semibold font-mono text-amber-700 tabular-nums mt-1">
+                          {analyticsSummary.max_aperture_mm.toFixed(2)} mm
+                        </div>
+                        <span className="text-[11px] font-mono text-slate-500">
+                          ACI 224R Critical Envelope
+                        </span>
+                      </div>
+                      <div className="bg-white border border-slate-200 rounded-lg p-4">
+                        <span className="text-xs text-slate-500">Calibrated Photogrammetry</span>
+                        <div className="text-xl font-semibold font-mono text-emerald-700 tabular-nums mt-1">
+                          {analyticsSummary.calibrated_assets} / {analyticsSummary.total_assets} Assets
+                        </div>
+                        <span className="text-[11px] font-mono text-slate-500">
+                          Fiducial mm/px Scale Active
+                        </span>
+                      </div>
+                      <div className="bg-white border border-slate-200 rounded-lg p-4">
+                        <span className="text-xs text-slate-500">Estimated Remediation Budget</span>
+                        <div className="text-xl font-semibold font-mono text-blue-600 tabular-nums mt-1">
+                          ${analyticsSummary.total_remediation_budget_usd.toLocaleString()}
+                        </div>
+                        <span className="text-[11px] font-mono text-slate-500">
+                          Prioritized Work Orders
+                        </span>
+                      </div>
                     </div>
-                    <div>
-                      <label className="block text-slate-600 mb-1">PE License / Stamp ID</label>
-                      <input
-                        type="text"
-                        value={engineerLicenseNo}
-                        onChange={(e) => setEngineerLicenseNo(e.target.value)}
-                        className="w-full px-3 py-2 font-mono bg-slate-50 border border-slate-300 rounded-md text-slate-900"
-                      />
-                    </div>
-                  </div>
-                </div>
-              </div>
 
-              <div className="lg:col-span-8 border border-slate-200 rounded-lg bg-white p-6 space-y-6">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-slate-200">
-                  <div>
-                    <p className="text-xs font-mono text-slate-500">
-                      DOCUMENT REF: INFRASCAN-ACI224R-2026
-                    </p>
-                    <h2 className="text-lg font-semibold text-slate-900 mt-0.5">
-                      Civil Infrastructure Structural Condition & Defect Ledger
-                    </h2>
-                  </div>
-                  <div className="text-xs font-mono text-slate-500 sm:text-right tabular-nums">
-                    <div>Generated: {new Date().toISOString().slice(0, 10)}</div>
-                    <div>
-                      Certifying PE: {engineerSignOffName || currentUser.full_name} ({engineerLicenseNo})
-                    </div>
-                  </div>
-                </div>
-
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-200 text-[11px] font-semibold text-slate-500">
-                        <th className="py-2.5 pr-4">Asset</th>
-                        <th className="py-2.5 px-3">Defect Class</th>
-                        <th className="py-2.5 px-3 text-right">Length (mm)</th>
-                        <th className="py-2.5 px-3 text-right">Max Width (mm)</th>
-                        <th className="py-2.5 px-3 text-right">Density</th>
-                        <th className="py-2.5 pl-3">Severity · Priority</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200/70">
-                      {(reportScope === 'critical_severe'
-                        ? assets.filter(
-                            (a) =>
-                              a.assessment.severity_level === 'Critical' ||
-                              a.assessment.severity_level === 'Severe'
-                          )
-                        : assets
-                      ).map((a) => (
-                        <tr key={a.asset_id}>
-                          <td className="py-3 pr-4">
-                            <div className="font-semibold text-slate-900">{a.asset_name}</div>
-                            {includePostgisCoords && (
-                              <div className="text-[11px] font-mono text-slate-500 tabular-nums">
-                                {a.latitude.toFixed(4)}°N, {a.longitude.toFixed(4)}°W
+                    {/* Severity Distribution, Multi-Class Defect Breakdown & Asset Type Risk */}
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                      <div className="lg:col-span-4 bg-white border border-slate-200 rounded-lg p-5 space-y-4">
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Severity Level Distribution
+                        </h3>
+                        <div className="space-y-3 text-xs">
+                          {analyticsSummary.severity_breakdown.map((item) => {
+                            const barColor =
+                              item.level === 'Critical'
+                                ? 'bg-red-600'
+                                : item.level === 'Severe'
+                                ? 'bg-amber-600'
+                                : item.level === 'Moderate'
+                                ? 'bg-yellow-500'
+                                : 'bg-emerald-600';
+                            return (
+                              <div key={item.level} className="space-y-1">
+                                <div className="flex items-center justify-between font-mono tabular-nums">
+                                  <span className="font-sans font-medium text-slate-800">
+                                    {item.level}
+                                  </span>
+                                  <span className="text-slate-600">
+                                    {item.count} assets ({item.pct}%)
+                                  </span>
+                                </div>
+                                <div className="h-2 w-full bg-slate-100 rounded overflow-hidden">
+                                  <div
+                                    className={`h-full ${barColor}`}
+                                    style={{ width: `${Math.max(item.pct, 4)}%` }}
+                                  />
+                                </div>
                               </div>
-                            )}
-                          </td>
-                          <td className="py-3 px-3 font-mono text-slate-800">
-                            {a.detection.defect_class}
-                          </td>
-                          <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-800">
-                            {a.segmentation.crack_length_mm.toFixed(1)}
-                          </td>
-                          <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-800">
-                            {a.segmentation.max_width_mm.toFixed(2)}
-                          </td>
-                          <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-800">
-                            {a.segmentation.crack_density_pct.toFixed(1)}%
-                          </td>
-                          <td className="py-3 pl-3">
-                            <span
-                              className={`font-semibold ${
-                                getSeverityMeta(a.assessment.severity_level).textClass
-                              }`}
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="lg:col-span-4 bg-white border border-slate-200 rounded-lg p-5 space-y-3">
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Multi-Class Defect Analytics
+                        </h3>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse text-xs font-mono tabular-nums">
+                            <thead>
+                              <tr className="border-b border-slate-200 text-[11px] font-sans text-slate-500">
+                                <th className="py-2 pr-2">Class</th>
+                                <th className="py-2 px-2 text-right">Count</th>
+                                <th className="py-2 px-2 text-right">Avg Width</th>
+                                <th className="py-2 pl-2 text-right">Density</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-200/70">
+                              {analyticsSummary.defect_class_breakdown.map((d) => (
+                                <tr key={d.defect_class}>
+                                  <td className="py-2 pr-2 font-sans font-medium text-slate-900">
+                                    {d.defect_class}
+                                  </td>
+                                  <td className="py-2 px-2 text-right text-slate-700">{d.count}</td>
+                                  <td className="py-2 px-2 text-right text-slate-800">
+                                    {d.avg_max_width_mm} mm
+                                  </td>
+                                  <td className="py-2 pl-2 text-right text-blue-600">
+                                    {d.avg_density_pct}%
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <div className="lg:col-span-4 bg-white border border-slate-200 rounded-lg p-5 space-y-3">
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Asset Type Structural Risk
+                        </h3>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse text-xs font-mono tabular-nums">
+                            <thead>
+                              <tr className="border-b border-slate-200 text-[11px] font-sans text-slate-500">
+                                <th className="py-2 pr-2">Structure</th>
+                                <th className="py-2 px-2 text-right">Health</th>
+                                <th className="py-2 pl-2 text-right">Total Length</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-200/70">
+                              {analyticsSummary.asset_type_risk.map((r) => (
+                                <tr key={r.asset_type}>
+                                  <td className="py-2 pr-2 font-sans font-medium text-slate-900">
+                                    {r.asset_type} ({r.count})
+                                  </td>
+                                  <td className="py-2 px-2 text-right text-slate-800">
+                                    {r.avg_health}/100
+                                  </td>
+                                  <td className="py-2 pl-2 text-right text-slate-700">
+                                    {r.total_crack_length_mm} mm
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* 21 Tasks & 17 Expected Outcomes Verification Matrix */}
+                {tasksStatus && (
+                  <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+                    <div className="p-5 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-slate-50/70">
+                      <div>
+                        <h2 className="text-base font-semibold text-slate-900">
+                          Program Scope: {tasksStatus.tasks_completed}/{tasksStatus.tasks_total} Tasks Complete ·{' '}
+                          {tasksStatus.outcomes_operational}/{tasksStatus.outcomes_total} Expected Outcomes Operational
+                        </h2>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          Live end-to-end verification matrix linking each engineering task and expected outcome to its active module and API endpoint.
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="flex items-center gap-1 p-1 bg-white border border-slate-200 rounded-md">
+                          {(['All', 'Image & CV', 'Models & XAI', 'GIS & Maintenance'] as const).map(
+                            (cat) => (
+                              <button
+                                key={cat}
+                                type="button"
+                                onClick={() => setTaskCategoryFilter(cat)}
+                                className={`px-2.5 py-1 text-xs font-medium rounded transition-colors cursor-pointer ${
+                                  taskCategoryFilter === cat
+                                    ? 'bg-blue-600 text-white'
+                                    : 'text-slate-600 hover:text-slate-900'
+                                }`}
+                              >
+                                {cat}
+                              </button>
+                            )
+                          )}
+                        </div>
+                        <input
+                          type="text"
+                          value={taskSearchQuery}
+                          onChange={(e) => setTaskSearchQuery(e.target.value)}
+                          placeholder="Filter tasks..."
+                          className="px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-md text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-blue-600"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-12 divide-y lg:divide-y-0 lg:divide-x divide-slate-200">
+                      {/* 21 Tasks Ledger */}
+                      <div className="lg:col-span-7 p-5 space-y-3">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                          21 Engineering & AI Pipeline Tasks
+                        </h3>
+                        <div className="divide-y divide-slate-200/70 max-h-[540px] overflow-y-auto pr-1">
+                          {tasksStatus.tasks
+                            .filter(
+                              (t) =>
+                                (taskCategoryFilter === 'All' ||
+                                  t.category === taskCategoryFilter) &&
+                                (!taskSearchQuery.trim() ||
+                                  t.title.toLowerCase().includes(taskSearchQuery.toLowerCase()) ||
+                                  t.evidence.toLowerCase().includes(taskSearchQuery.toLowerCase()))
+                            )
+                            .map((t) => (
+                              <div
+                                key={t.id}
+                                className="py-3 flex items-start justify-between gap-3 text-xs"
+                              >
+                                <div className="space-y-0.5">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono font-semibold text-blue-600">
+                                      {t.id}
+                                    </span>
+                                    <span className="font-semibold text-slate-900">{t.title}</span>
+                                    <span className="text-[11px] font-medium text-emerald-700">
+                                      · {t.status}
+                                    </span>
+                                  </div>
+                                  <div className="text-slate-600">{t.evidence}</div>
+                                  <div className="text-[11px] font-mono text-slate-500">
+                                    {t.category} · {t.endpoint}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveWorkspace(t.workspace);
+                                    if (t.id === 'T10' || t.id === 'T11' || t.id === 'T13') {
+                                      setInspectionSubTab('benchmarks');
+                                    } else if (t.workspace === 'inspection') {
+                                      setInspectionSubTab('viewport');
+                                    } else if (t.id === 'T19') {
+                                      setAssetLayout('priority');
+                                    } else if (t.id === 'T18' && selectedAsset) {
+                                      handleOpenHistory(selectedAsset.asset_id);
+                                    }
+                                  }}
+                                  className="px-2.5 py-1 text-[11px] font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 rounded whitespace-nowrap shrink-0 cursor-pointer"
+                                >
+                                  Open Module
+                                </button>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+
+                      {/* 17 Expected Outcomes Ledger */}
+                      <div className="lg:col-span-5 p-5 space-y-3 bg-slate-50/40">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                          17 Expected Outcomes
+                        </h3>
+                        <div className="divide-y divide-slate-200/70 max-h-[540px] overflow-y-auto pr-1">
+                          {tasksStatus.outcomes.map((o) => (
+                            <div
+                              key={o.id}
+                              className="py-2.5 flex items-center justify-between gap-3 text-xs"
                             >
-                              {a.assessment.severity_level} · {a.assessment.maintenance_priority}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                              <div>
+                                <div className="font-medium text-slate-900">
+                                  <span className="font-mono text-slate-500 mr-2">{o.id}</span>
+                                  {o.title}
+                                </div>
+                                <div className="text-[11px] font-mono text-slate-500">
+                                  Linked: {o.linked_tasks.join(', ')}
+                                </div>
+                              </div>
+                              <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-700 whitespace-nowrap shrink-0">
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                <span>{o.status}</span>
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                <div className="lg:col-span-4 border border-slate-200 rounded-lg bg-white p-5 space-y-5">
+                  <h3 className="text-sm font-semibold text-slate-900 pb-3 border-b border-slate-200 flex items-center gap-2">
+                    <FileCheck2 className="w-4 h-4 text-blue-600" />
+                    <span>Compliance Export Configuration</span>
+                  </h3>
+
+                  <div className="space-y-4 text-xs">
+                    <div>
+                      <label className="block font-medium text-slate-700 mb-1.5">
+                        Included Asset Scope
+                      </label>
+                      <select
+                        value={reportScope}
+                        onChange={(e) =>
+                          setReportScope(e.target.value as 'all' | 'critical_severe')
+                        }
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-md text-slate-900"
+                      >
+                        <option value="all">
+                          Full Civil Infrastructure Inventory ({assets.length})
+                        </option>
+                        <option value="critical_severe">
+                          Critical & Severe Remediation Queue Only ({portfolioStats.criticalOrSevere})
+                        </option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-2 pt-2">
+                      <label className="flex items-center gap-2 text-slate-700 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={includeXaiAppendix}
+                          onChange={(e) => setIncludeXaiAppendix(e.target.checked)}
+                          className="accent-blue-600"
+                        />
+                        <span>Include Grad-CAM XAI Attribution Coordinates</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-slate-700 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={includePostgisCoords}
+                          onChange={(e) => setIncludePostgisCoords(e.target.checked)}
+                          className="accent-blue-600"
+                        />
+                        <span>Include PostGIS EPSG:4326 Spatial Coordinates</span>
+                      </label>
+                    </div>
+
+                    <div className="pt-4 border-t border-slate-200 space-y-3">
+                      <h4 className="font-semibold text-slate-900">
+                        Certifying Civil Engineer Sign-Off
+                      </h4>
+                      <div>
+                        <label className="block text-slate-600 mb-1">Engineer Full Name</label>
+                        <input
+                          type="text"
+                          value={engineerSignOffName}
+                          onChange={(e) => setEngineerSignOffName(e.target.value)}
+                          className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-md text-slate-900"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-600 mb-1">PE License / Stamp ID</label>
+                        <input
+                          type="text"
+                          value={engineerLicenseNo}
+                          onChange={(e) => setEngineerLicenseNo(e.target.value)}
+                          className="w-full px-3 py-2 font-mono bg-slate-50 border border-slate-300 rounded-md text-slate-900"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleExportModelReport}
+                        className="w-full px-3 py-2 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-md flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Export Model Evaluation Report (JSON)</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="pt-5 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs text-slate-500">
-                  <div>
-                    Attested in accordance with ACI 224R-01 & FHWA Bridge Inspector Reference
-                    Manual. All frames passed Laplacian sharpness threshold ($\text&#123;Var&#125;(\Delta I) \ge 100.0$).
+                <div className="lg:col-span-8 border border-slate-200 rounded-lg bg-white p-6 space-y-6">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-slate-200">
+                    <div>
+                      <p className="text-xs font-mono text-slate-500">
+                        DOCUMENT REF: INFRASCAN-ACI224R-2026
+                      </p>
+                      <h2 className="text-lg font-semibold text-slate-900 mt-0.5">
+                        Civil Infrastructure Structural Condition & Defect Ledger
+                      </h2>
+                    </div>
+                    <div className="text-xs font-mono text-slate-500 sm:text-right tabular-nums">
+                      <div>Generated: {new Date().toISOString().slice(0, 10)}</div>
+                      <div>
+                        Certifying PE: {engineerSignOffName || currentUser.full_name} (
+                        {engineerLicenseNo})
+                      </div>
+                    </div>
                   </div>
-                  <div className="font-mono font-semibold text-slate-800 shrink-0">
-                    Signed: {engineerSignOffName || currentUser.full_name} · {engineerLicenseNo}
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-[11px] font-semibold text-slate-500">
+                          <th className="py-2.5 pr-4">Asset</th>
+                          <th className="py-2.5 px-3">Defect Class</th>
+                          <th className="py-2.5 px-3 text-right">Length (mm)</th>
+                          <th className="py-2.5 px-3 text-right">Max Width (mm)</th>
+                          <th className="py-2.5 px-3 text-right">Density</th>
+                          <th className="py-2.5 pl-3">Severity · Priority</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200/70">
+                        {(reportScope === 'critical_severe'
+                          ? assets.filter(
+                              (a) =>
+                                a.assessment.severity_level === 'Critical' ||
+                                a.assessment.severity_level === 'Severe'
+                            )
+                          : assets
+                        ).map((a) => (
+                          <tr key={a.asset_id}>
+                            <td className="py-3 pr-4">
+                              <div className="font-semibold text-slate-900">{a.asset_name}</div>
+                              {includePostgisCoords && (
+                                <div className="text-[11px] font-mono text-slate-500 tabular-nums">
+                                  {a.latitude.toFixed(4)}°N, {a.longitude.toFixed(4)}°W
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-3 px-3 font-mono text-slate-800">
+                              {a.detection.defect_class}
+                            </td>
+                            <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-800">
+                              {a.segmentation.crack_length_mm.toFixed(1)}
+                            </td>
+                            <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-800">
+                              {a.segmentation.max_width_mm.toFixed(2)}
+                            </td>
+                            <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-800">
+                              {a.segmentation.crack_density_pct.toFixed(1)}%
+                            </td>
+                            <td className="py-3 pl-3">
+                              <span
+                                className={`font-semibold ${
+                                  getSeverityMeta(a.assessment.severity_level).textClass
+                                }`}
+                              >
+                                {a.assessment.severity_level} · {a.assessment.maintenance_priority}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="pt-5 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs text-slate-500">
+                    <div>
+                      Attested in accordance with ACI 224R-01 & FHWA Bridge Inspector Reference
+                      Manual. All frames passed Laplacian sharpness threshold (Var(ΔI) &gt;= 100.0).
+                    </div>
+                    <div className="font-mono font-semibold text-slate-800 shrink-0">
+                      Signed: {engineerSignOffName || currentUser.full_name} · {engineerLicenseNo}
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
+            )}
           </div>
         )}
       </main>
@@ -3092,6 +4394,128 @@ export default function App() {
                   Close
                 </button>
               </div>
+
+              {/* Side-by-Side Historical Inspection Comparison */}
+              {historyDrawerAsset.history.length >= 2 && (() => {
+                const hist = historyDrawerAsset.history;
+                const entryA = hist[Math.min(compareIdxA, hist.length - 1)];
+                const entryB = hist[Math.min(compareIdxB, hist.length - 1)];
+                const widthDelta = Number((entryB.max_width_mm - entryA.max_width_mm).toFixed(2));
+                const densityDelta = Number(
+                  (entryB.crack_density_pct - entryA.crack_density_pct).toFixed(1)
+                );
+                const maxW = Math.max(...hist.map((h) => h.max_width_mm), 1);
+
+                return (
+                  <div className="border border-slate-200 rounded-lg bg-slate-50 p-4 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
+                        <GitCompare className="w-3.5 h-3.5 text-blue-600" />
+                        <span>Historical Inspection Comparison</span>
+                      </h3>
+                      <span className="text-[11px] font-mono text-slate-500">
+                        Aperture Progression
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                      <div>
+                        <label className="block text-[11px] text-slate-500 mb-1">
+                          Baseline Survey (T0)
+                        </label>
+                        <select
+                          value={compareIdxA}
+                          onChange={(e) => setCompareIdxA(Number(e.target.value))}
+                          className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-slate-900 font-mono"
+                        >
+                          {hist.map((h, i) => (
+                            <option key={h.inspection_id} value={i}>
+                              #{h.inspection_id} ({new Date(h.inspection_date).toISOString().slice(0, 10)})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-slate-500 mb-1">
+                          Follow-Up Survey (T1)
+                        </label>
+                        <select
+                          value={compareIdxB}
+                          onChange={(e) => setCompareIdxB(Number(e.target.value))}
+                          className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-slate-900 font-mono"
+                        >
+                          {hist.map((h, i) => (
+                            <option key={h.inspection_id} value={i}>
+                              #{h.inspection_id} ({new Date(h.inspection_date).toISOString().slice(0, 10)})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 text-xs font-mono tabular-nums">
+                      <div className="p-2.5 bg-white border border-slate-200 rounded">
+                        <span className="block text-[10px] font-sans text-slate-500">
+                          Δ Max Width
+                        </span>
+                        <span
+                          className={`font-semibold ${
+                            widthDelta > 0 ? 'text-red-600' : 'text-emerald-700'
+                          }`}
+                        >
+                          {widthDelta > 0 ? `+${widthDelta}` : widthDelta} mm
+                        </span>
+                      </div>
+                      <div className="p-2.5 bg-white border border-slate-200 rounded">
+                        <span className="block text-[10px] font-sans text-slate-500">
+                          Δ Surface Density
+                        </span>
+                        <span
+                          className={`font-semibold ${
+                            densityDelta > 0 ? 'text-amber-700' : 'text-emerald-700'
+                          }`}
+                        >
+                          {densityDelta > 0 ? `+${densityDelta}` : densityDelta}%
+                        </span>
+                      </div>
+                      <div className="p-2.5 bg-white border border-slate-200 rounded">
+                        <span className="block text-[10px] font-sans text-slate-500">
+                          Severity Shift
+                        </span>
+                        <span className="font-sans font-semibold text-slate-900">
+                          {entryA.severity_level} → {entryB.severity_level}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Inline Progression Sparkline */}
+                    <div className="bg-white border border-slate-200 rounded p-2.5">
+                      <div className="flex items-end gap-3 h-14">
+                        {[...hist].reverse().map((h) => {
+                          const pct = Math.max(Math.round((h.max_width_mm / maxW) * 100), 18);
+                          return (
+                            <div
+                              key={h.inspection_id}
+                              className="flex-1 flex flex-col items-center justify-end h-full gap-1"
+                            >
+                              <span className="text-[10px] font-mono text-slate-600 tabular-nums">
+                                {h.max_width_mm}mm
+                              </span>
+                              <div
+                                className="w-full bg-blue-600/80 rounded-t"
+                                style={{ height: `${pct}%` }}
+                              />
+                              <span className="text-[10px] font-mono text-slate-500">
+                                {new Date(h.inspection_date).toISOString().slice(0, 7)}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div className="space-y-4">
                 {historyDrawerAsset.history.map((item) => {
